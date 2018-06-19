@@ -26,33 +26,38 @@
 
 #include <asm/machdep.h>
 
-/* Offset between Unix time (1970-based) and Mac time (1904-based) */
+/*
+ * Offset between Unix time (1970-based) and Mac time (1904-based). Cuda and PMU
+ * times wrap in 2040. If we need to handle later times, the read_time functions
+ * need to be changed to interpret wrapped times as post-2040.
+ */
 
 #define RTC_OFFSET 2082844800
 
 static void (*rom_reset)(void);
 
 #ifdef CONFIG_ADB_CUDA
-static long cuda_read_time(void)
+static time64_t cuda_read_time(void)
 {
 	struct adb_request req;
-	long time;
+	time64_t time;
 
 	if (cuda_request(&req, NULL, 2, CUDA_PACKET, CUDA_GET_TIME) < 0)
 		return 0;
 	while (!req.complete)
 		cuda_poll();
 
-	time = (req.reply[3] << 24) | (req.reply[4] << 16) |
-	       (req.reply[5] << 8) | req.reply[6];
+	time = (u32)((req.reply[3] << 24) | (req.reply[4] << 16) |
+		     (req.reply[5] << 8) | req.reply[6]);
+
 	return time - RTC_OFFSET;
 }
 
-static void cuda_write_time(long data)
+static void cuda_write_time(time64_t time)
 {
 	struct adb_request req;
+	u32 data = lower_32_bits(time + RTC_OFFSET);
 
-	data += RTC_OFFSET;
 	if (cuda_request(&req, NULL, 6, CUDA_PACKET, CUDA_SET_TIME,
 			 (data >> 24) & 0xFF, (data >> 16) & 0xFF,
 			 (data >> 8) & 0xFF, data & 0xFF) < 0)
@@ -86,26 +91,27 @@ static void cuda_write_pram(int offset, __u8 data)
 #endif /* CONFIG_ADB_CUDA */
 
 #ifdef CONFIG_ADB_PMU68K
-static long pmu_read_time(void)
+static time64_t pmu_read_time(void)
 {
 	struct adb_request req;
-	long time;
+	time64_t time;
 
 	if (pmu_request(&req, NULL, 1, PMU_READ_RTC) < 0)
 		return 0;
 	while (!req.complete)
 		pmu_poll();
 
-	time = (req.reply[1] << 24) | (req.reply[2] << 16) |
-	       (req.reply[3] << 8) | req.reply[4];
+	time = (u32)((req.reply[1] << 24) | (req.reply[2] << 16) |
+		     (req.reply[3] << 8) | req.reply[4]);
+
 	return time - RTC_OFFSET;
 }
 
-static void pmu_write_time(long data)
+static void pmu_write_time(time64_t time)
 {
 	struct adb_request req;
+	u32 data = lower_32_bits(time + RTC_OFFSET);
 
-	data += RTC_OFFSET;
 	if (pmu_request(&req, NULL, 5, PMU_SET_RTC,
 			(data >> 24) & 0xFF, (data >> 16) & 0xFF,
 			(data >> 8) & 0xFF, data & 0xFF) < 0)
@@ -269,8 +275,12 @@ static long via_read_time(void)
 		via_pram_command(0x89, &result.cdata[1]);
 		via_pram_command(0x8D, &result.cdata[0]);
 
-		if (result.idata == last_result.idata)
+		if (result.idata == last_result.idata) {
+			if (result.idata < RTC_OFFSET)
+				result.idata += 0x100000000ull;
+
 			return result.idata - RTC_OFFSET;
+		}
 
 		if (++count > 10)
 			break;
@@ -291,11 +301,11 @@ static long via_read_time(void)
  * is basically any machine with Mac II-style ADB.
  */
 
-static void via_write_time(long time)
+static void via_write_time(time64_t time)
 {
 	union {
 		__u8 cdata[4];
-		long idata;
+		__u32 idata;
 	} data;
 	__u8 temp;
 
@@ -585,12 +595,15 @@ void mac_reset(void)
  * This function translates seconds since 1970 into a proper date.
  *
  * Algorithm cribbed from glibc2.1, __offtime().
+ *
+ * This is roughly same as rtc_time64_to_tm(), which we should probably
+ * use here, but it's only available when CONFIG_RTC_LIB is enabled.
  */
 #define SECS_PER_MINUTE (60)
 #define SECS_PER_HOUR  (SECS_PER_MINUTE * 60)
 #define SECS_PER_DAY   (SECS_PER_HOUR * 24)
 
-static void unmktime(unsigned long time, long offset,
+static void unmktime(time64_t time, long offset,
 		     int *yearp, int *monp, int *dayp,
 		     int *hourp, int *minp, int *secp)
 {
@@ -602,11 +615,10 @@ static void unmktime(unsigned long time, long offset,
 		/* Leap years.  */
 		{ 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366 }
 	};
-	long int days, rem, y, wday, yday;
+	int days, rem, y, wday, yday;
 	const unsigned short int *ip;
 
-	days = time / SECS_PER_DAY;
-	rem = time % SECS_PER_DAY;
+	days = div_u64_rem(time, SECS_PER_DAY, &rem);
 	rem += offset;
 	while (rem < 0) {
 		rem += SECS_PER_DAY;
@@ -657,7 +669,7 @@ static void unmktime(unsigned long time, long offset,
 
 int mac_hwclk(int op, struct rtc_time *t)
 {
-	unsigned long now;
+	time64_t now;
 
 	if (!op) { /* read */
 		switch (macintosh_config->adb_type) {
@@ -693,8 +705,8 @@ int mac_hwclk(int op, struct rtc_time *t)
 		         __func__, t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
 		         t->tm_hour, t->tm_min, t->tm_sec);
 
-		now = mktime(t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-			     t->tm_hour, t->tm_min, t->tm_sec);
+		now = mktime64(t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+			       t->tm_hour, t->tm_min, t->tm_sec);
 
 		switch (macintosh_config->adb_type) {
 		case MAC_ADB_IOP:
