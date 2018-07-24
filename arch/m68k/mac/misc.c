@@ -251,11 +251,11 @@ static void via_write_pram(int offset, __u8 data)
  * is basically any machine with Mac II-style ADB.
  */
 
-static long via_read_time(void)
+static time64_t via_read_time(void)
 {
 	union {
 		__u8 cdata[4];
-		long idata;
+		__u32 idata;
 	} result, last_result;
 	int count = 1;
 
@@ -275,12 +275,8 @@ static long via_read_time(void)
 		via_pram_command(0x89, &result.cdata[1]);
 		via_pram_command(0x8D, &result.cdata[0]);
 
-		if (result.idata == last_result.idata) {
-			if (result.idata < RTC_OFFSET)
-				result.idata += 0x100000000ull;
-
-			return result.idata - RTC_OFFSET;
-		}
+		if (result.idata == last_result.idata)
+			return (time64_t)result.idata - RTC_OFFSET;
 
 		if (++count > 10)
 			break;
@@ -288,8 +284,8 @@ static long via_read_time(void)
 		last_result.idata = result.idata;
 	}
 
-	pr_err("via_read_time: failed to read a stable value; got 0x%08lx then 0x%08lx\n",
-	       last_result.idata, result.idata);
+	pr_err("%s: failed to read a stable value; got 0x%08x then 0x%08x\n",
+	       __func__, last_result.idata, result.idata);
 
 	return 0;
 }
@@ -314,7 +310,7 @@ static void via_write_time(time64_t time)
 	temp = 0x55;
 	via_pram_command(0x35, &temp);
 
-	data.idata = time + RTC_OFFSET;
+	data.idata = lower_32_bits(time + RTC_OFFSET);
 	via_pram_command(0x01, &data.cdata[3]);
 	via_pram_command(0x05, &data.cdata[2]);
 	via_pram_command(0x09, &data.cdata[1]);
