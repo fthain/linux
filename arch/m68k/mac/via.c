@@ -24,6 +24,7 @@
  */
 
 #include <linux/clocksource.h>
+#include <linux/clockchips.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -583,24 +584,51 @@ static u32 clk_total, clk_offset;
 
 static irqreturn_t via_timer_handler(int irq, void *dev_id)
 {
+	struct clock_event_device *evt = dev_id;
+
 	clk_total += VIA_TIMER_CYCLES;
 	clk_offset = 0;
-	legacy_timer_tick(1);
+	evt->event_handler(evt);
 
 	return IRQ_HANDLED;
 }
 
-void __init via_init_clock(void)
+static int via_set_periodic(struct clock_event_device *evt)
 {
-	if (request_irq(IRQ_MAC_TIMER_1, via_timer_handler, IRQF_TIMER, "timer",
-			NULL)) {
-		pr_err("Couldn't register %s interrupt\n", "timer");
-		return;
-	}
-
 	via1[vT1CL] = VIA_TC_LOW;
 	via1[vT1CH] = VIA_TC_HIGH;
 	via1[vACR] |= 0x40;
+
+	return 0;
+}
+
+static int via_set_shutdown(struct clock_event_device *evt)
+{
+	via1[vACR] &= ~0x40;
+
+	return 0;
+}
+
+static struct clock_event_device via_clk_event = {
+	.name	= "via1",
+	.rating = 250,
+	.irq	= IRQ_MAC_TIMER_1,
+	.owner	= THIS_MODULE,
+
+	.features		= CLOCK_EVT_FEAT_PERIODIC,
+	.set_state_shutdown	= via_set_shutdown,
+	.set_state_periodic	= via_set_periodic,
+};
+
+void __init via_init_clock(void)
+{
+	clockevents_config_and_register(&via_clk_event, VIA_CLOCK_FREQ, 1, 0xffff);
+
+	if (request_irq(IRQ_MAC_TIMER_1, via_timer_handler, IRQF_TIMER, "timer",
+			&via_clk_event)) {
+		pr_err("Couldn't register %s interrupt\n", "timer");
+		return;
+	}
 
 	clocksource_register_hz(&mac_clk, VIA_CLOCK_FREQ);
 }
