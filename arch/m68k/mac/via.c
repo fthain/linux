@@ -564,15 +564,13 @@ EXPORT_SYMBOL(via2_scsi_drq_pending);
 /* timer and clock source */
 
 #define VIA_CLOCK_FREQ     783360                /* VIA "phase 2" clock in Hz */
-#define VIA_TIMER_CYCLES   (VIA_CLOCK_FREQ / HZ) /* clock cycles per jiffy */
-
-#define VIA_TC             (VIA_TIMER_CYCLES - 2) /* including 0 and -1 */
-#define VIA_TC_LOW         (VIA_TC & 0xFF)
-#define VIA_TC_HIGH        (VIA_TC >> 8)
+#define VIA_TC_LOW         0xFE
+#define VIA_TC_HIGH        0xFE
+#define VIA_TIMER_CYCLES   ((VIA_TC_HIGH << 8) + VIA_TC_LOW + 2)
 
 static u64 mac_read_clk(struct clocksource *cs);
 
-static struct clocksource mac_clk = {
+static struct clocksource mac_clk_source = {
 	.name   = "via1",
 	.rating = 250,
 	.read   = mac_read_clk,
@@ -582,62 +580,73 @@ static struct clocksource mac_clk = {
 
 static u32 clk_total, clk_offset;
 
-static irqreturn_t via_timer_handler(int irq, void *dev_id)
+static irqreturn_t via_t1_int(int irq, void *dev_id)
+{
+	clk_total += VIA_TIMER_CYCLES;
+	clk_offset = 0;
+
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t via_t2_int(int irq, void *dev_id)
 {
 	struct clock_event_device *evt = dev_id;
 
-	clk_total += VIA_TIMER_CYCLES;
-	clk_offset = 0;
 	evt->event_handler(evt);
 
 	return IRQ_HANDLED;
 }
 
-static int via_set_periodic(struct clock_event_device *evt)
+static int via_set_next_event(unsigned long delta, struct clock_event_device *evt)
 {
-	via1[vT1CL] = VIA_TC_LOW;
-	via1[vT1CH] = VIA_TC_HIGH;
-	via1[vACR] |= 0x40;
+	/* The interrupt fires N + 1.5 VIA clock cycles after the vT2CH
+	 * register write. The writes themselves require about 1 cycle.
+	 */
+	delta -= 2;
 
-	return 0;
-}
-
-static int via_set_shutdown(struct clock_event_device *evt)
-{
-	via1[vACR] &= ~0x40;
+	via1[vT2CL] = delta & 0xFF;
+	via1[vT2CH] = delta >> 8;
 
 	return 0;
 }
 
 static struct clock_event_device via_clk_event = {
-	.name	= "via1",
-	.rating = 250,
-	.irq	= IRQ_MAC_TIMER_1,
-	.owner	= THIS_MODULE,
-
-	.features		= CLOCK_EVT_FEAT_PERIODIC,
-	.set_state_shutdown	= via_set_shutdown,
-	.set_state_periodic	= via_set_periodic,
+	.name           = "via1",
+	.rating         = 250,
+	.irq            = IRQ_MAC_TIMER_2,
+	.features       = CLOCK_EVT_FEAT_ONESHOT,
+	.set_next_event = via_set_next_event,
+	.owner          = THIS_MODULE,
 };
 
 void __init via_init_clock(void)
 {
-	clockevents_config_and_register(&via_clk_event, VIA_CLOCK_FREQ, 1, 0xffff);
+	/* Timer 1 is used in free-running mode by the clocksource driver.
+	 * Timer 2 is used in one-shot mode by the clockevent driver.
+	 */
+	via1[vACR] = (via1[vACR] & 0x1F) | 0x40;
 
-	if (request_irq(IRQ_MAC_TIMER_1, via_timer_handler, IRQF_TIMER, "timer",
-			&via_clk_event)) {
+	via1[vT1CL] = VIA_TC_LOW;
+	via1[vT1CH] = VIA_TC_HIGH;
+
+	clocksource_register_hz(&mac_clk_source, VIA_CLOCK_FREQ);
+
+	if (request_irq(IRQ_MAC_TIMER_1, via_t1_int, IRQF_TIMER, "timer1",
+			NULL))
 		pr_err("Couldn't register %s interrupt\n", "timer");
-		return;
-	}
 
-	clocksource_register_hz(&mac_clk, VIA_CLOCK_FREQ);
+	clockevents_config_and_register(&via_clk_event, VIA_CLOCK_FREQ,
+	                                0xF, 0xFFFF);
+
+	if (request_irq(IRQ_MAC_TIMER_2, via_t2_int, IRQF_TIMER, "timer2",
+			&via_clk_event))
+		pr_err("Couldn't register %s interrupt\n", "timer");
 }
 
 static u64 mac_read_clk(struct clocksource *cs)
 {
 	unsigned long flags;
 	u8 count_high;
-	u16 count;
 	u32 ticks;
 
 	/*
@@ -655,8 +664,7 @@ static u64 mac_read_clk(struct clocksource *cs)
 		count_high = 0;
 	if (count_high > 0 && (via1[vIFR] & VIA_TIMER_1_INT))
 		clk_offset = VIA_TIMER_CYCLES;
-	count = count_high << 8;
-	ticks = VIA_TIMER_CYCLES - count;
+	ticks = (VIA_TC_HIGH - count_high) << 8;
 	ticks += clk_offset + clk_total;
 	local_irq_restore(flags);
 
