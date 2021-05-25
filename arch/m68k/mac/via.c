@@ -641,6 +641,8 @@ void __init via_init_clock(void)
 		pr_err("Couldn't register %s interrupt\n", "timer");
 }
 
+static u32 prev_ticks;
+
 static u64 mac_read_clk(struct clocksource *cs)
 {
 	unsigned long flags;
@@ -664,6 +666,10 @@ static u64 mac_read_clk(struct clocksource *cs)
 		clk_offset = VIA_TIMER_CYCLES;
 	ticks = (VIA_TC_HIGH - count_high) << 8;
 	ticks += clk_offset + clk_total;
+if (ticks < prev_ticks) {
+pr_warn("%s: %u < %u\n", __func__, ticks, prev_ticks);
+}
+prev_ticks = ticks;
 	local_irq_restore(flags);
 
 	return ticks;
