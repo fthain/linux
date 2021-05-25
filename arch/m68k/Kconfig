@@ -62,11 +62,6 @@ config ZONE_DMA
 	bool
 	default y
 
-config HZ
-	int
-	default 1000 if CLEOPATRA
-	default 100
-
 config PGTABLE_LEVELS
 	default 2 if SUN3 || COLDFIRE
 	default 3
@@ -124,6 +119,8 @@ source "arch/m68k/Kconfig.bus"
 endmenu
 
 menu "Kernel Features"
+
+source "kernel/Kconfig.hz"
 
 endmenu
 
