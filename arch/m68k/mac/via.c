@@ -379,41 +379,39 @@ void via_nubus_irq_shutdown(int irq)
  */
 
 #define VIA_TIMER_1_INT BIT(6)
+#define VIA_TIMER_2_INT BIT(5)
 
 void via1_irq(struct irq_desc *desc)
 {
 	int irq_num;
 	unsigned char irq_bit, events;
+	unsigned long flags;
 
 	events = via1[vIFR] & via1[vIER] & 0x7F;
-	if (!events)
-		return;
-
-	irq_num = IRQ_MAC_TIMER_1;
 	irq_bit = VIA_TIMER_1_INT;
-	if (events & irq_bit) {
-		unsigned long flags;
+	irq_num = IRQ_MAC_TIMER_1;
 
-		local_irq_save(flags);
-		via1[vIFR] = irq_bit;
-		generic_handle_irq(irq_num);
-		local_irq_restore(flags);
-
-		events &= ~irq_bit;
-		if (!events)
-			return;
+	while (events & (IRQ_MAC_TIMER_1 | IRQ_MAC_TIMER_2)) {
+		if (events & irq_bit) {
+			local_irq_save(flags);
+			via1[vIFR] = irq_bit;
+			generic_handle_irq(irq_num);
+			local_irq_restore(flags);
+			events &= ~irq_bit;
+		}
+		--irq_num;
+		irq_bit >>= 1;
 	}
 
-	irq_num = VIA1_SOURCE_BASE;
-	irq_bit = 1;
-	do {
+	while (events) {
 		if (events & irq_bit) {
 			via1[vIFR] = irq_bit;
 			generic_handle_irq(irq_num);
+			events &= ~irq_bit;
 		}
-		++irq_num;
-		irq_bit <<= 1;
-	} while (events >= irq_bit);
+		--irq_num;
+		irq_bit >>= 1;
+	}
 }
 
 static void via2_irq(struct irq_desc *desc)
