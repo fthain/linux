@@ -703,7 +703,7 @@ static const struct scsi_host_template driver_template = {
 	.cmd_per_lun		= 2,
 	.dma_boundary		= PAGE_SIZE - 1,
 	.cmd_size		= sizeof(struct NCR5380_cmd),
-	.max_sectors		= 128,
+	.max_sectors		= DMA_MAX_SIZE >> SECTOR_SHIFT,
 };
 
 static int generic_NCR5380_isa_match(struct device *pdev, unsigned int ndev)
