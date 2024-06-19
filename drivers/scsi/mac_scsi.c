@@ -208,8 +208,6 @@ __setup("mac5380=", mac_scsi_setup);
 		".previous                     \n" \
 		: "+a" (addr), "+r" (n), "+r" (result) : "a" (io))
 
-#define MAC_PDMA_DELAY		32
-
 static inline int mac_pdma_recv(void __iomem *io, unsigned char *start, int n)
 {
 	unsigned char *addr = start;
@@ -274,6 +272,43 @@ static inline void write_ctrl_reg(struct NCR5380_hostdata *hostdata, u32 value)
 	out_be32(hostdata->io + (CTRL_REG << 4), value);
 }
 
+static inline bool macscsi_wait_for_drq(struct NCR5380_hostdata *hostdata)
+{
+	unsigned int n = 5; /* effectively multiplies NCR5380_REG_POLL_TIME */
+	unsigned char basr;
+
+again:
+	basr = NCR5380_read(BUS_AND_STATUS_REG);
+
+	if (!(basr & BASR_PHASE_MATCH))
+		return false;
+
+	if (basr & BASR_IRQ) {
+		dsprintk(NDEBUG_PSEUDO_DMA, hostdata->host,
+			 "%s: unexpected irq\n", __func__);
+		NCR5380_dprint(NDEBUG_PSEUDO_DMA, hostdata->host);
+		set_host_byte(hostdata->connected, DID_ERROR);
+		return false;
+	}
+
+	if (basr & BASR_DRQ)
+		return true;
+
+	if (n-- == 0) {
+		dsprintk(NDEBUG_PSEUDO_DMA, hostdata->host,
+			 "%s: timeout\n", __func__);
+		NCR5380_dprint(NDEBUG_PSEUDO_DMA, hostdata->host);
+		set_host_byte(hostdata->connected, DID_ERROR);
+		return false;
+	}
+
+	if (!NCR5380_poll_politely(hostdata, BUS_AND_STATUS_REG,
+				   BASR_DRQ | BASR_PHASE_MATCH | BASR_IRQ,
+				   BASR_DRQ | BASR_PHASE_MATCH, 0))
+		return true;
+	goto again;
+}
+
 /*
  * The Last Byte Sent flag isn't very useful on this hardware. Schematics show
  * the /EOP pin on the 53C80 is tied high.
@@ -287,9 +322,7 @@ static inline int macscsi_pread(struct NCR5380_hostdata *hostdata,
 
 	hostdata->pdma_residual = len;
 
-	while (!NCR5380_poll_politely(hostdata, BUS_AND_STATUS_REG,
-	                              BASR_DRQ | BASR_PHASE_MATCH,
-	                              BASR_DRQ | BASR_PHASE_MATCH, 0)) {
+	while (macscsi_wait_for_drq(hostdata)) {
 		int bytes;
 
 		if (macintosh_config->ident == MAC_MODEL_IIFX)
@@ -304,30 +337,18 @@ static inline int macscsi_pread(struct NCR5380_hostdata *hostdata,
 		}
 
 		if (hostdata->pdma_residual == 0)
-			goto out;
-
-		if (NCR5380_poll_politely2(hostdata, STATUS_REG, SR_REQ, SR_REQ,
-		                           BUS_AND_STATUS_REG, BASR_ACK,
-		                           BASR_ACK, 0) < 0)
-			scmd_printk(KERN_DEBUG, hostdata->connected,
-			            "%s: !REQ and !ACK\n", __func__);
-		if (!(NCR5380_read(BUS_AND_STATUS_REG) & BASR_PHASE_MATCH))
-			goto out;
-
-		if (bytes == 0)
-			udelay(MAC_PDMA_DELAY);
+			break;
 
 		if (bytes >= 0)
 			continue;
 
 		dsprintk(NDEBUG_PSEUDO_DMA, hostdata->host,
 		         "%s: bus error (%d/%d)\n", __func__, d - dst, len);
+		NCR5380_dprint(NDEBUG_PSEUDO_DMA, hostdata->host);
+		set_host_byte(hostdata->connected, DID_ERROR);
 		break;
 	}
 
-	NCR5380_dprint(NDEBUG_PSEUDO_DMA, hostdata->host);
-	set_host_byte(hostdata->connected, DID_ERROR);
-out:
 	if (macintosh_config->ident == MAC_MODEL_IIFX)
 		write_ctrl_reg(hostdata, CTRL_INTERRUPTS_ENABLE);
 	return 0;
@@ -341,9 +362,7 @@ static inline int macscsi_pwrite(struct NCR5380_hostdata *hostdata,
 
 	hostdata->pdma_residual = len;
 
-	while (!NCR5380_poll_politely(hostdata, BUS_AND_STATUS_REG,
-	                              BASR_DRQ | BASR_PHASE_MATCH,
-	                              BASR_DRQ | BASR_PHASE_MATCH, 0)) {
+	while (macscsi_wait_for_drq(hostdata)) {
 		int bytes;
 
 		if (macintosh_config->ident == MAC_MODEL_IIFX)
@@ -358,30 +377,18 @@ static inline int macscsi_pwrite(struct NCR5380_hostdata *hostdata,
 		}
 
 		if (hostdata->pdma_residual == 0)
-			goto out;
-
-		if (NCR5380_poll_politely2(hostdata, STATUS_REG, SR_REQ, SR_REQ,
-		                           BUS_AND_STATUS_REG, BASR_ACK,
-		                           BASR_ACK, 0) < 0)
-			scmd_printk(KERN_DEBUG, hostdata->connected,
-			            "%s: !REQ and !ACK\n", __func__);
-		if (!(NCR5380_read(BUS_AND_STATUS_REG) & BASR_PHASE_MATCH))
-			goto out;
-
-		if (bytes == 0)
-			udelay(MAC_PDMA_DELAY);
+			break;
 
 		if (bytes >= 0)
 			continue;
 
 		dsprintk(NDEBUG_PSEUDO_DMA, hostdata->host,
 		         "%s: bus error (%d/%d)\n", __func__, s - src, len);
+		NCR5380_dprint(NDEBUG_PSEUDO_DMA, hostdata->host);
+		set_host_byte(hostdata->connected, DID_ERROR);
 		break;
 	}
 
-	NCR5380_dprint(NDEBUG_PSEUDO_DMA, hostdata->host);
-	set_host_byte(hostdata->connected, DID_ERROR);
-out:
 	if (macintosh_config->ident == MAC_MODEL_IIFX)
 		write_ctrl_reg(hostdata, CTRL_INTERRUPTS_ENABLE);
 	return 0;
