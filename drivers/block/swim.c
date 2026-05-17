@@ -392,6 +392,29 @@ static int swim_track00(struct swim __iomem *base)
 	return -1;
 }
 
+static int swim_trackNN(struct swim __iomem *base)
+{
+	int try;
+
+	swim_action(base, SEEK_POSITIVE);
+
+	for (try = 0; try < 5; try++) {
+		msleep(3);
+
+		if (!swim_readbit(base, TRACK_ZERO))
+			return 0;
+
+		if (swim_step(base))
+			break;
+	}
+
+	pr_err("swim: track advance failed\n");
+	return -1;
+}
+
+unsigned int align;
+module_param(align, uint, 0);
+
 static int swim_seek(struct swim __iomem *base, int step)
 {
 	if (step < 0) {
@@ -749,6 +772,59 @@ static const struct block_device_operations floppy_fops = {
 	.check_events	 = floppy_check_events,
 };
 
+static void swim_alignment_loop(struct swim_priv *swd,
+                                struct floppy_state *fs,
+                                enum drive_location location)
+{
+	struct swim __iomem *base = swd->base;
+	char *buffer;
+
+	printk(KERN_INFO "%s: %d: insert a known-good disk\n", __func__, location);
+	msleep(15 * 1000);
+
+	setup_medium(fs);
+
+	buffer = kmalloc(fs->secpertrack * 512, GFP_KERNEL);
+	if (!buffer)
+		return;
+
+	if (fs->disk_in) {
+		swim_motor(base, ON);
+		swim_action(base, SETMFM);
+		msleep(30);
+
+		while (swim_readbit(base, DISK_IN)) {
+			unsigned int cyl = align % 80, head = 0, sector = 0;
+			unsigned int n_ok, n = fs->secpertrack;
+
+			if (n == 0)
+				break;
+
+			swim_READY_timeout(base);
+			swim_trackNN(base);
+			swim_READY_timeout(base);
+			swim_track00(base);
+			fs->track = 0;
+			swim_READY_timeout(base);
+			swim_track(fs, cyl);
+			swim_head(base, head);
+
+			n_ok = swim_read_sector_range(fs, head, cyl, sector + 1, n, buffer);
+
+			pr_info("sectors read: %u/%u %3d%%\n",
+			        n_ok, n, 100 * n_ok / n);
+
+			msleep(100);
+		}
+
+		swim_motor(base, OFF);
+	}
+
+	printk(KERN_INFO "%s: %d: no disk detected\n", __func__, location);
+
+	kfree(buffer);
+}
+
 static void swim_add_floppy(struct swim_priv *swd, enum drive_location location)
 {
 	struct floppy_state *fs = &swd->unit[swd->floppy_count];
@@ -758,6 +834,9 @@ static void swim_add_floppy(struct swim_priv *swd, enum drive_location location)
 	if (!swim_readbit(base, DRIVE_PRESENT) ||
 	    swim_readbit(base, ONEMEG_DRIVE))
 		goto out;
+
+	pr_info("swim: detected FDD at location %d\n", location);
+
 	if (swim_readbit(base, DISK_IN))
 		swim_motor(base, ON);
 	if (swim_track00(base))
@@ -774,6 +853,9 @@ static void swim_add_floppy(struct swim_priv *swd, enum drive_location location)
 	fs->track = 0;
 
 	swd->floppy_count++;
+
+	if (align)
+		swim_alignment_loop(swd, fs, location);
 
 out:
 	swim_motor(base, OFF);
@@ -820,6 +902,8 @@ static int swim_floppy_init(struct platform_device *pdev)
 	int drive;
 	struct swim __iomem *base = swd->base;
 
+	pr_info("swim: fast_fclk is %s\n", fast_fclk ? "true" : "false");
+
 	swim_write(base, setup, S_IBM_DRIVE | (fast_fclk ? S_FCLK_DIV2 : 0));
 
 	swim_set_parameters(base);
@@ -829,6 +913,9 @@ static int swim_floppy_init(struct platform_device *pdev)
 	swim_add_floppy(swd, INTERNAL_DRIVE);
 	swim_add_floppy(swd, EXTERNAL_DRIVE);
 	swim_drive(base, NO_DRIVE);
+
+	if (!swd->floppy_count)
+		pr_info("swim: no FDD detected\n");
 
 	/* register floppy drives */
 
